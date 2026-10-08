@@ -1,6 +1,5 @@
 # Build output
-/exo.exe
-/exo-v*.exe
+/dist/
 *.exe
 
 # Scan artifact

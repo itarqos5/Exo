@@ -94,6 +94,11 @@ It is the kind of tool server staff use during a "screenshare" check.
 
       go build -ldflags "-s -w" -o exo.exe ./src
 
+  Or use the build script, which wipes dist/ and writes both
+  dist\exo.exe and a versioned dist\exo-v<version>.exe:
+
+      .\build.ps1 -Version 1.0.0
+
   The result is a single static .exe with no runtime dependencies.
 
 
