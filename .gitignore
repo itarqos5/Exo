@@ -1,0 +1,11 @@
+# Build output
+/exo.exe
+/exo-v*.exe
+*.exe
+
+# Scan artifact
+result.txt
+
+# Go
+*.test
+*.out
