@@ -10,39 +10,45 @@ import (
 
 func main() {
 	enableVT()
+	setTitle("Exo · Minecraft integrity scanner")
+	clearScreen()
 	banner()
 
 	start := time.Now()
-	divider("Locating launchers")
-	instances := findInstances()
-	if len(instances) == 0 {
-		warnLine("No Minecraft mod folders found on this machine.")
-		info("Checked default/Modrinth/Prism/PolyMC/MultiMC/CurseForge/GDLauncher/")
-		info("ATLauncher/Technic/FTB/XMCL/Lunar/Feather/Badlion/TLauncher.")
+
+	section(1, "Discover")
+	var instances []Instance
+	runWithSpinner("Searching launcher folders on all drives", func() {
+		instances = findInstances()
+	})
+	printInstances(instances)
+
+	section(2, "Inspect")
+	refs := collectJars(instances)
+	var mods []ModResult
+	if len(refs) == 0 {
+		info("No mod jars to inspect.")
 	} else {
-		okLine(fmt.Sprintf("%s%d%s mod folder(s) found", cBold, len(instances), cReset))
-		for _, inst := range instances {
-			info(fmt.Sprintf("%s%-18s%s %s%-18s%s %s", cLilac, inst.Launcher, cReset, cWhite, trunc(inst.Name, 18), cReset, cGray+inst.ModsDir+cReset))
+		live := newLiveScan(len(refs))
+		live.run()
+		mods = inspectAll(refs, live.hooks())
+		live.finish()
+	}
+
+	section(3, "Verify")
+	online := true
+	if len(mods) > 0 {
+		runWithSpinner(fmt.Sprintf("Checking %d hashes against Modrinth", len(mods)), func() {
+			online = verifyModrinth(mods)
+		})
+		if !online {
+			warnLine("Could not reach Modrinth — hash verification skipped (offline?).")
 		}
 	}
-
-	divider("Scanning mods")
-	mods, online := scanMods(instances, func(done, total int, label string) {
-		progressBar(done, total, label)
+	var logFlags []LogFlag
+	runWithSpinner("Scanning launcher logs for cheat-client markers", func() {
+		logFlags = scanLogs(instances)
 	})
-	if len(mods) > 0 {
-		progressBar(len(mods), len(mods), "complete")
-		fmt.Println()
-	}
-	if !online {
-		warnLine("Could not reach Modrinth — hash verification skipped (offline?).")
-	}
-
-	divider("Scanning logs")
-	logFlags := scanLogs(instances)
-	if len(logFlags) == 0 {
-		okLine("no cheat-client markers in logs")
-	}
 
 	var verified, unknown, warn, flagged int
 	for _, m := range mods {
@@ -58,76 +64,24 @@ func main() {
 		}
 	}
 
-	divider("Results")
-	printResults(mods, logFlags)
-
-	// Framed summary panel.
-	var resultColor, resultText string
-	switch {
-	case flagged > 0 || len(logFlags) > 0:
-		resultColor, resultText = cRed, "SUSPICIOUS — review required"
-	case warn > 0:
-		resultColor, resultText = cYellow, "INCONCLUSIVE — obfuscated/unverifiable mods"
-	case unknown > 0:
-		resultColor, resultText = cYellow, "INCONCLUSIVE — some mods unverifiable"
-	case len(mods) > 0:
-		resultColor, resultText = cGreen, "CLEAN — all mods verified, no cheats"
-	default:
-		resultColor, resultText = cGray, "NOTHING SCANNED"
-	}
-	counts := fmt.Sprintf("%s%d ok%s   %s%d unknown%s   %s%d warn%s   %s%d flagged%s   %s%d log-hits%s",
-		cGreen, verified, cReset, cYellow, unknown, cReset,
-		cYellow, warn, cReset, cRed, flagged, cReset, cRed, len(logFlags), cReset)
-
-	fmt.Println()
-	fmt.Println(boxTop(resultColor))
-	fmt.Println(boxLine(resultColor, cBold+cWhite+"SUMMARY"+cReset+cGray+fmt.Sprintf("   %d mods across %d instance(s)", len(mods), len(instances))+cReset))
-	fmt.Println(boxLine(resultColor, counts))
-	fmt.Println(boxLine(resultColor, ""))
-	fmt.Println(boxLine(resultColor, cBold+resultColor+"RESULT: "+resultText+cReset))
-	fmt.Println(boxBottom(resultColor))
-
-	reportPath := writeReport(instances, mods, logFlags, verified, unknown, warn, flagged, online, time.Since(start))
-	fmt.Println()
-	okLine("Report written to " + cBold + cWhite + reportPath + cReset)
-	info(fmt.Sprintf("Scan completed in %s", time.Since(start).Round(time.Millisecond)))
-
-	fmt.Println()
-	info(cDim + "Detects KNOWN clients, tampered/unpublished mods and heavy obfuscation.")
-	info(cDim + "Private or custom-obfuscated cheats can still pass — use as one signal,")
-	info(cDim + "not definitive proof.")
-
-	fmt.Print("\n  " + cLilac + "Press Enter to close…" + cReset)
-	bufio.NewReader(os.Stdin).ReadString('\n')
-}
-
-func printResults(mods []ModResult, logFlags []LogFlag) {
-	for _, m := range mods {
-		tag := cDim + "(" + m.Instance.Launcher + "/" + m.Instance.Name + ")" + cReset
-		switch m.Verdict {
-		case VerdictFlagged:
-			flagLine(m.FileName + "  " + tag)
-			for _, r := range m.Reasons {
-				fmt.Println("      " + cRed + "• " + r + cReset)
-			}
-		case VerdictWarn:
-			warnLine(m.FileName + "  " + tag)
-			for _, r := range m.Reasons {
-				fmt.Println("      " + cYellow + "• " + r + cReset)
-			}
-		case VerdictUnknown:
-			warnLine(m.FileName + cGray + "  not found on Modrinth (custom/unpublished?)" + cReset)
-		case VerdictVerified:
-			okLine(m.FileName + cGray + "  verified" + cReset)
-		}
-	}
-	if len(logFlags) > 0 {
+	section(4, "Results")
+	if len(instances) > 0 {
+		printInstanceTable(instances, mods)
 		fmt.Println()
-		for _, lf := range logFlags {
-			flagLine(fmt.Sprintf("log hit: %s in %s:%d", lf.Client, lf.File, lf.Line))
-			fmt.Println("      " + cRed + lf.Excerpt + cReset)
-		}
 	}
+	printFindings(mods, logFlags)
+
+	dur := time.Since(start)
+	reportPath := writeReport(instances, mods, logFlags, verified, unknown, warn, flagged, online, dur)
+	printSummary(len(instances), len(mods), verified, unknown, warn, flagged, len(logFlags), dur, reportPath)
+
+	fmt.Println()
+	fmt.Println("  " + cDark + "Exo detects KNOWN clients, tampered/unpublished mods and heavy obfuscation." + cReset)
+	fmt.Println("  " + cDark + "Private or custom-obfuscated cheats can still pass — one signal, not proof." + cReset)
+
+	fmt.Print("\n  " + cLilac + "›" + cReset + " " + cGray + "Press Enter to close" + cReset + " ")
+	showCursor()
+	bufio.NewReader(os.Stdin).ReadString('\n')
 }
 
 func writeReport(instances []Instance, mods []ModResult, logFlags []LogFlag, verified, unknown, warn, flagged int, online bool, dur time.Duration) string {

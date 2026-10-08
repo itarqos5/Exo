@@ -16,12 +16,23 @@ It is the kind of tool server staff use during a "screenshare" check.
   * Finds mod folders across every common launcher, even when the
     launcher has been relocated to another drive via junctions:
       - Default .minecraft
+      - OneClient (clusters)
       - Modrinth App / Theseus
-      - Prism Launcher, PolyMC, MultiMC
+      - Prism Launcher, ElyPrism, Fjord, Freesm, PolyMC, UltimMC,
+        MultiMC
       - CurseForge (current + legacy)
       - GDLauncher / GDLauncher Carbon
-      - ATLauncher, Technic, FTB App, XMCL
-      - Lunar, Feather, Badlion, TLauncher
+      - ATLauncher, Technic, FTB App, XMCL, HMCL
+      - Lunar, Feather, Badlion, LabyMod, Salwyrr, TLauncher,
+        SKLauncher
+
+  * Sweeps every local drive (fixed and removable) for launcher
+    folders installed outside AppData, e.g. D:\Minecraft\OneClient
+    or G:\Games\PrismLauncher. Only folders that actually look like
+    a Minecraft install are deep-scanned, so the sweep stays fast.
+
+  * Inspects jars in parallel with 4 worker threads, with a live
+    dashboard showing what each worker is doing.
 
   * For every .jar it finds:
       - Computes SHA-1 and SHA-512 hashes.

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 type Verdict int
@@ -48,31 +49,69 @@ type jarRef struct {
 	path string
 }
 
-// scanMods hashes every jar, inspects its contents for cheat signatures and
-// obfuscation, then classifies it. progress is called after each jar.
-func scanMods(instances []Instance, progress func(done, total int, label string)) ([]ModResult, bool) {
+// scanWorkers is how many jars are hashed and inspected in parallel.
+const scanWorkers = 4
+
+// ScanHooks lets the UI follow the worker pool. Both are called from worker
+// goroutines, so implementations must be safe for concurrent use.
+type ScanHooks struct {
+	Start func(worker int, fileName string)
+	Done  func(worker int, res ModResult)
+}
+
+// collectJars lists every mod jar across all instances, in a stable order.
+func collectJars(instances []Instance) []jarRef {
 	var refs []jarRef
 	for _, inst := range instances {
 		for _, jar := range listJars(inst.ModsDir) {
 			refs = append(refs, jarRef{inst, jar})
 		}
 	}
+	return refs
+}
 
-	var results []ModResult
+// inspectAll hashes and inspects every jar using a pool of scanWorkers
+// goroutines. Results keep the same order as refs regardless of which worker
+// finished first.
+func inspectAll(refs []jarRef, hooks ScanHooks) []ModResult {
+	results := make([]ModResult, len(refs))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+
+	for w := 0; w < scanWorkers; w++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for i := range jobs {
+				ref := refs[i]
+				if hooks.Start != nil {
+					hooks.Start(worker, filepath.Base(ref.path))
+				}
+				res := inspectJar(ref.inst, ref.path)
+				results[i] = res
+				if hooks.Done != nil {
+					hooks.Done(worker, res)
+				}
+			}
+		}(w)
+	}
+	for i := range refs {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	return results
+}
+
+// verifyModrinth checks every hash against Modrinth in batches and updates the
+// verdicts in place. It returns false if Modrinth could not be reached.
+func verifyModrinth(results []ModResult) bool {
 	var allSHA1 []string
-	total := len(refs)
-	for i, ref := range refs {
-		res := inspectJar(ref.inst, ref.path)
-		results = append(results, res)
-		if res.SHA1 != "" {
-			allSHA1 = append(allSHA1, res.SHA1)
-		}
-		if progress != nil {
-			progress(i+1, total, res.FileName)
+	for _, r := range results {
+		if r.SHA1 != "" {
+			allSHA1 = append(allSHA1, r.SHA1)
 		}
 	}
-
-	// Verify hashes against Modrinth in one batch.
 	known, online := lookupHashes(allSHA1)
 	for i := range results {
 		if v, ok := known[results[i].SHA1]; ok {
@@ -87,7 +126,7 @@ func scanMods(instances []Instance, progress func(done, total int, label string)
 			}
 		}
 	}
-	return results, online
+	return online
 }
 
 func listJars(dir string) []string {
@@ -184,7 +223,7 @@ func inspectJar(inst Instance, path string) ModResult {
 		res.Reasons = append(res.Reasons, "obfuscation: "+obfReason)
 	}
 	if len(classBaseNames) > 5 && !hasMetadata {
-		res.Reasons = append(res.Reasons, "no mod metadata (fabric.mod.json / mods.toml) despite containing classes")
+		res.Reasons = append(res.Reasons, "has classes but no fabric.mod.json / mods.toml")
 		obf = true
 	}
 
@@ -215,10 +254,10 @@ func looksObfuscated(classBaseNames []string) (bool, string) {
 	}
 	total := float64(len(classBaseNames))
 	if float64(short)/total >= 0.6 {
-		return true, "most class names are 1–2 characters (likely obfuscated)"
+		return true, "mostly 1–2 char class names"
 	}
 	if float64(confusable)/total >= 0.4 {
-		return true, "many class names use confusable characters (l/I/1/O/0)"
+		return true, "confusable class names (l/I/1/O/0)"
 	}
 	return false, ""
 }
