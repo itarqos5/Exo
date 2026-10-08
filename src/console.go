@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -37,6 +38,10 @@ const (
 	enableVirtualTerminalProcess = 0x0004
 )
 
+// isConsole is true when stdout is a real console (not a pipe/file). We only
+// animate in that case, so redirected output doesn't fill with cursor codes.
+var isConsole bool
+
 // enableVT turns on ANSI escape handling in the Windows console so our colors
 // and box-drawing render instead of showing as raw escape codes.
 func enableVT() {
@@ -49,6 +54,7 @@ func enableVT() {
 	if ret == 0 {
 		return
 	}
+	isConsole = true
 	procSetConsoleMode.Call(handle, uintptr(mode|enableVirtualTerminalProcess))
 }
 
@@ -100,23 +106,152 @@ func divider(title string) {
 	fmt.Println(label + " " + cPurple + strings.Repeat("─", dashes) + cReset)
 }
 
-// banner prints a framed, pure-ASCII "EXO" wordmark in the purple theme.
-func banner() {
-	art := []string{
-		`  ______  __   __  ______`,
-		` |  ____| \ \ / / |  __  |`,
-		` | |__     \ V /  | |  | |`,
-		` |  __|    > <    | |  | |`,
-		` | |____  / . \   | |__| |`,
-		` |______|/_/ \_\  |______|`,
+// --- 3D animated EXO wordmark ---
+
+// Block-letter faces. Every row is the same width so the grid is rectangular
+// and the extrusion lines up. Layout: E(6) gap(3) X(7) gap(3) O(7).
+var exoFace = []string{
+	"██████   ██   ██    █████ ",
+	"██        ██ ██    ██   ██",
+	"█████      ███     ██   ██",
+	"█████      ███     ██   ██",
+	"██        ██ ██    ██   ██",
+	"██████   ██   ██    █████ ",
+}
+
+// Face gradient, light lavender at top fading to deep purple at the bottom.
+var exoGrad = []string{
+	"\x1b[38;5;189m", "\x1b[38;5;147m", "\x1b[38;5;141m",
+	"\x1b[38;5;135m", "\x1b[38;5;99m", "\x1b[38;5;98m",
+}
+
+const (
+	exoDepth     = 2                  // extrusion length (down-right)
+	exoDepthCol  = "\x1b[38;5;55m"    // dark violet for the 3D side
+	exoHiCore    = "\x1b[38;5;231m"   // white shimmer core
+	exoHiEdge    = "\x1b[38;5;189m"   // lavender shimmer edge
+)
+
+type exoCell struct {
+	kind int // 0 empty, 1 face, 2 depth
+	row  int // original face row (for gradient), face cells only
+}
+
+var (
+	exoGrid [][]exoCell
+	exoH    int
+	exoW    int
+)
+
+// buildExo lays the faces on a grid and extrudes each face cell down-right to
+// create the 3D side, keeping the bright face on top.
+func buildExo() {
+	faceH := len(exoFace)
+	faceW := 0
+	for _, r := range exoFace {
+		if rl := len([]rune(r)); rl > faceW {
+			faceW = rl
+		}
 	}
-	cols := []string{cPurple, cPurple, cLilac, cLilac, cMag, cMag}
+	exoH = faceH + exoDepth
+	exoW = faceW + exoDepth
+	exoGrid = make([][]exoCell, exoH)
+	for i := range exoGrid {
+		exoGrid[i] = make([]exoCell, exoW)
+	}
+	runes := make([][]rune, faceH)
+	for r := range exoFace {
+		runes[r] = []rune(exoFace[r])
+	}
+	// Pass 1: extrusion (only onto empty cells).
+	for r := 0; r < faceH; r++ {
+		for c := 0; c < len(runes[r]); c++ {
+			if runes[r][c] != '█' {
+				continue
+			}
+			for k := 1; k <= exoDepth; k++ {
+				rr, cc := r+k, c+k
+				if rr < exoH && cc < exoW && exoGrid[rr][cc].kind == 0 {
+					exoGrid[rr][cc] = exoCell{kind: 2}
+				}
+			}
+		}
+	}
+	// Pass 2: bright faces on top.
+	for r := 0; r < faceH; r++ {
+		for c := 0; c < len(runes[r]); c++ {
+			if runes[r][c] == '█' {
+				exoGrid[r][c] = exoCell{kind: 1, row: r}
+			}
+		}
+	}
+}
+
+// renderExo returns the wordmark's lines. hl is the shimmer's leading column
+// (negative disables the shimmer).
+func renderExo(hl int) []string {
+	lines := make([]string, exoH)
+	for r := 0; r < exoH; r++ {
+		var sb strings.Builder
+		last := ""
+		put := func(color, ch string) {
+			if color != last {
+				sb.WriteString(color)
+				last = color
+			}
+			sb.WriteString(ch)
+		}
+		for c := 0; c < exoW; c++ {
+			cell := exoGrid[r][c]
+			switch cell.kind {
+			case 0:
+				put(cReset, " ")
+			case 2:
+				put(exoDepthCol, "█")
+			case 1:
+				color := exoGrad[cell.row]
+				if hl >= 0 && c <= hl && c > hl-3 {
+					if c == hl {
+						color = exoHiCore
+					} else {
+						color = exoHiEdge
+					}
+				}
+				put(color, "█")
+			}
+		}
+		sb.WriteString(cReset)
+		lines[r] = sb.String()
+	}
+	return lines
+}
+
+// banner prints the framed 3D EXO wordmark, with an intro shimmer on a console.
+func banner() {
+	buildExo()
 	fmt.Println()
 	fmt.Println(boxTop(cPurple))
 	fmt.Println(boxLine(cPurple, ""))
-	for i, l := range art {
-		fmt.Println(boxLine(cPurple, cols[i]+cBold+l+cReset))
+
+	static := renderExo(-1)
+	for _, l := range static {
+		fmt.Println(boxLine(cPurple, l))
 	}
+
+	if isConsole {
+		for hl := 0; hl <= exoW+3; hl++ {
+			time.Sleep(18 * time.Millisecond)
+			fmt.Printf("\x1b[%dA", exoH) // cursor up to first art row
+			for _, l := range renderExo(hl) {
+				fmt.Println(boxLine(cPurple, l))
+			}
+		}
+		fmt.Printf("\x1b[%dA", exoH) // settle on the clean static frame
+		for _, l := range static {
+			fmt.Println(boxLine(cPurple, l))
+		}
+	}
+
 	fmt.Println(boxLine(cPurple, ""))
 	fmt.Println(boxLine(cPurple, cGray+"  minecraft mod & log integrity scanner"+cReset))
 	fmt.Println(boxLine(cPurple, cDim+"  v1.0  ·  modrinth-verified  ·  offline-capable"+cReset))
@@ -140,7 +275,7 @@ func progressBar(current, total int, label string) {
 		ratio = 1
 	}
 	filled := int(ratio * width)
-	bar := cMag + strings.Repeat("█", filled) + cGray + strings.Repeat("░", width-filled) + cReset
+	bar := cLilac + strings.Repeat("█", filled) + cGray + strings.Repeat("░", width-filled) + cReset
 
 	label = strings.TrimSuffix(label, ".jar")
 	if r := []rune(label); len(r) > 22 {
