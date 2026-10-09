@@ -1,6 +1,7 @@
 package main
 
 import (
+	"exo/engine"
 	"fmt"
 	"regexp"
 	"strings"
@@ -72,23 +73,15 @@ func enableVT() {
 
 // --- terminal control (console only) ---
 
-func setTitle(t string) {
-	if isConsole {
-		fmt.Printf("\x1b]0;%s\x07", t)
-	}
-}
-func clearScreen() {
-	if isConsole {
-		fmt.Print("\x1b[2J\x1b[H")
-	}
-}
+// In full-screen mode the renderer keeps the cursor hidden, so these only
+// apply to streaming output.
 func hideCursor() {
-	if isConsole {
+	if isConsole && !scr.full {
 		fmt.Print("\x1b[?25l")
 	}
 }
 func showCursor() {
-	if isConsole {
+	if isConsole && !scr.full {
 		fmt.Print("\x1b[?25h")
 	}
 }
@@ -214,13 +207,13 @@ func section(num int, title string) {
 	if dashes < 0 {
 		dashes = 0
 	}
-	fmt.Println()
-	fmt.Println(label + cDark + strings.Repeat("─", dashes) + cReset)
+	out("")
+	out(label + cDark + strings.Repeat("─", dashes) + cReset)
 }
 
-func info(msg string)     { fmt.Println("     " + cGray + msg + cReset) }
-func okLine(msg string)   { fmt.Println("  " + cGreen + "✓" + cReset + "  " + msg) }
-func warnLine(msg string) { fmt.Println("  " + cAmber + "!" + cReset + "  " + msg) }
+func info(msg string)     { out("     " + cGray + msg + cReset) }
+func okLine(msg string)   { out("  " + cGreen + "✓" + cReset + "  " + msg) }
+func warnLine(msg string) { out("  " + cAmber + "!" + cReset + "  " + msg) }
 
 // --- 3D animated EXO wordmark ---
 
@@ -353,46 +346,40 @@ func banner() {
 		cBold + cWhite + "Minecraft integrity scanner" + cReset,
 		cGray + "mods · hashes · signatures · logs" + cReset,
 		"",
-		badge("v1.0", bgPurple) + "  " + cDim + "modrinth-verified" + cReset,
-		cDim + fmt.Sprintf("%d workers · offline-capable", scanWorkers) + cReset,
+		badge("v"+appVersion, bgPurple) + "  " + cDim + "modrinth-verified" + cReset,
+		cDim + fmt.Sprintf("%d workers · offline-capable", engine.Workers) + cReset,
 		"",
 		"",
 	}
 	compose := func(art []string) []string {
-		out := make([]string, len(art))
+		lines := make([]string, len(art))
 		for i, l := range art {
 			s := ""
 			if i < len(side) {
 				s = side[i]
 			}
-			out[i] = boxLine(cPurple, "  "+l+"    "+s)
+			lines[i] = boxLine(cPurple, "  "+l+"    "+s)
 		}
-		return out
+		return lines
 	}
 
-	fmt.Println()
-	fmt.Println(boxTop(cPurple))
-	fmt.Println(boxLine(cPurple, ""))
+	out("")
+	out(boxTop(cPurple))
+	out(boxLine(cPurple, ""))
 
 	static := compose(renderExo(-1))
 	for _, l := range static {
-		fmt.Println(l)
+		out(l)
 	}
 
 	if isConsole {
 		for hl := 0; hl <= exoW+3; hl++ {
 			time.Sleep(18 * time.Millisecond)
-			fmt.Printf("\x1b[%dA", exoH) // cursor up to first art row
-			for _, l := range compose(renderExo(hl)) {
-				fmt.Println(l)
-			}
+			scr.replaceLast(exoH, compose(renderExo(hl)))
 		}
-		fmt.Printf("\x1b[%dA", exoH) // settle on the clean static frame
-		for _, l := range static {
-			fmt.Println(l)
-		}
+		scr.replaceLast(exoH, static) // settle on the clean static frame
 	}
 
-	fmt.Println(boxLine(cPurple, ""))
-	fmt.Println(boxBottom(cPurple))
+	out(boxLine(cPurple, ""))
+	out(boxBottom(cPurple))
 }

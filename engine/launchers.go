@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"os"
@@ -65,12 +65,12 @@ func launcherLabel(path string) string {
 	return "Other"
 }
 
-// findInstances locates Minecraft mod folders across every launcher we know of.
+// FindInstances locates Minecraft mod folders across every launcher we know of.
 // It deep-scans each launcher's root directory for folders literally named
 // "mods" that contain at least one jar, so it is not limited to .minecraft.
 // It first checks the launchers' default locations, then sweeps every local
 // drive for launcher folders installed elsewhere (e.g. D:\Minecraft\OneClient).
-func findInstances() []Instance {
+func FindInstances() []Instance {
 	appdata := os.Getenv("APPDATA")    // Roaming
 	local := os.Getenv("LOCALAPPDATA") // Local
 	home, _ := os.UserHomeDir()        // %USERPROFILE%
@@ -183,6 +183,7 @@ const (
 )
 
 var (
+	kernel32             = syscall.NewLazyDLL("kernel32.dll")
 	procGetLogicalDrives = kernel32.NewProc("GetLogicalDrives")
 	procGetDriveTypeW    = kernel32.NewProc("GetDriveTypeW")
 )

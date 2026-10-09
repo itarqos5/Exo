@@ -1,118 +1,97 @@
-package main
+package engine
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 )
 
-func main() {
-	enableVT()
-	setTitle("Exo · Minecraft integrity scanner")
-	clearScreen()
-	banner()
+// Version is the Exo release version, shown in both apps and the report.
+const Version = "1.2.0"
 
-	start := time.Now()
+// Summary is the outcome of one full scan.
+type Summary struct {
+	Instances []Instance
+	Mods      []ModResult
+	LogFlags  []LogFlag
+	Verified  int
+	Unknown   int
+	Warn      int
+	Flagged   int
+	Online    bool // Modrinth was reachable
+	Duration  time.Duration
+}
 
-	section(1, "Discover")
-	var instances []Instance
-	runWithSpinner("Searching launcher folders on all drives", func() {
-		instances = findInstances()
-	})
-	printInstances(instances)
-
-	section(2, "Inspect")
-	refs := collectJars(instances)
-	var mods []ModResult
-	if len(refs) == 0 {
-		info("No mod jars to inspect.")
-	} else {
-		live := newLiveScan(len(refs))
-		live.run()
-		mods = inspectAll(refs, live.hooks())
-		live.finish()
-	}
-
-	section(3, "Verify")
-	online := true
-	if len(mods) > 0 {
-		runWithSpinner(fmt.Sprintf("Checking %d hashes against Modrinth", len(mods)), func() {
-			online = verifyModrinth(mods)
-		})
-		if !online {
-			warnLine("Could not reach Modrinth — hash verification skipped (offline?).")
-		}
-	}
-	var logFlags []LogFlag
-	runWithSpinner("Scanning launcher logs for cheat-client markers", func() {
-		logFlags = scanLogs(instances)
-	})
-
-	var verified, unknown, warn, flagged int
+// NewSummary tallies verdicts for a finished scan.
+func NewSummary(instances []Instance, mods []ModResult, logFlags []LogFlag, online bool, dur time.Duration) Summary {
+	s := Summary{Instances: instances, Mods: mods, LogFlags: logFlags, Online: online, Duration: dur}
 	for _, m := range mods {
 		switch m.Verdict {
 		case VerdictVerified:
-			verified++
+			s.Verified++
 		case VerdictUnknown:
-			unknown++
+			s.Unknown++
 		case VerdictWarn:
-			warn++
+			s.Warn++
 		case VerdictFlagged:
-			flagged++
+			s.Flagged++
 		}
 	}
-
-	section(4, "Results")
-	if len(instances) > 0 {
-		printInstanceTable(instances, mods)
-		fmt.Println()
-	}
-	printFindings(mods, logFlags)
-
-	dur := time.Since(start)
-	reportPath := writeReport(instances, mods, logFlags, verified, unknown, warn, flagged, online, dur)
-	printSummary(len(instances), len(mods), verified, unknown, warn, flagged, len(logFlags), dur, reportPath)
-
-	fmt.Println()
-	fmt.Println("  " + cDark + "Exo detects KNOWN clients, tampered/unpublished mods and heavy obfuscation." + cReset)
-	fmt.Println("  " + cDark + "Private or custom-obfuscated cheats can still pass — one signal, not proof." + cReset)
-
-	fmt.Print("\n  " + cLilac + "›" + cReset + " " + cGray + "Press Enter to close" + cReset + " ")
-	showCursor()
-	bufio.NewReader(os.Stdin).ReadString('\n')
+	return s
 }
 
-func writeReport(instances []Instance, mods []ModResult, logFlags []LogFlag, verified, unknown, warn, flagged int, online bool, dur time.Duration) string {
-	const path = "result.txt"
+// Overall is the single verdict for a scan, most severe first.
+type Overall string
+
+const (
+	OverallSuspicious   Overall = "suspicious"
+	OverallInconclusive Overall = "inconclusive"
+	OverallClean        Overall = "clean"
+	OverallEmpty        Overall = "empty"
+)
+
+func (s Summary) Overall() Overall {
+	switch {
+	case s.Flagged > 0 || len(s.LogFlags) > 0:
+		return OverallSuspicious
+	case s.Warn > 0 || s.Unknown > 0:
+		return OverallInconclusive
+	case len(s.Mods) > 0:
+		return OverallClean
+	}
+	return OverallEmpty
+}
+
+// WriteReport writes the full plain-text report to path.
+func WriteReport(path string, s Summary) error {
 	var b strings.Builder
 	w := func(format string, a ...any) { fmt.Fprintf(&b, format, a...); b.WriteByte('\n') }
 
 	w("================================================================")
-	w(" EXO  -  Minecraft mod & log integrity report")
+	w(" EXO v%s  -  Minecraft mod & log integrity report", Version)
 	w(" Generated: %s", time.Now().Format("2006-01-02 15:04:05 MST"))
-	w(" Scan duration: %s", dur.Round(time.Millisecond))
-	w(" Modrinth verification: %v", online)
+	w(" Scan duration: %s", s.Duration.Round(time.Millisecond))
+	w(" Modrinth verification: %v", s.Online)
 	w("================================================================")
 	w("")
 	w("SUMMARY")
-	w("  Instances scanned  : %d", len(instances))
-	w("  Mods scanned       : %d", len(mods))
-	w("  Verified (Modrinth): %d", verified)
-	w("  Unknown            : %d", unknown)
-	w("  Warnings (obf/meta): %d", warn)
-	w("  FLAGGED (cheats)   : %d", flagged)
-	w("  Log hits           : %d", len(logFlags))
+	w("  Instances scanned  : %d", len(s.Instances))
+	w("  Mods scanned       : %d", len(s.Mods))
+	w("  Verified (Modrinth): %d", s.Verified)
+	w("  Unknown            : %d", s.Unknown)
+	w("  Warnings (obf/meta): %d", s.Warn)
+	w("  FLAGGED (cheats)   : %d", s.Flagged)
+	w("  Log hits           : %d", len(s.LogFlags))
 	w("")
 	switch {
-	case flagged > 0 || len(logFlags) > 0:
+	case s.Flagged > 0 || len(s.LogFlags) > 0:
 		w("  OVERALL: SUSPICIOUS - matched a known cheat signature. Review required.")
-	case warn > 0:
+	case s.Warn > 0:
 		w("  OVERALL: INCONCLUSIVE - obfuscated or metadata-less mods present.")
-	case unknown > 0:
+	case s.Unknown > 0:
 		w("  OVERALL: INCONCLUSIVE - some mods could not be verified on Modrinth.")
-	case len(mods) > 0:
+	case len(s.Mods) > 0:
 		w("  OVERALL: CLEAN (within detection limits) - all mods verified.")
 	default:
 		w("  OVERALL: NOTHING SCANNED - no mod folders found.")
@@ -126,23 +105,23 @@ func writeReport(instances []Instance, mods []ModResult, logFlags []LogFlag, ver
 	w("----------------------------------------------------------------")
 	w("INSTANCES")
 	w("----------------------------------------------------------------")
-	for _, inst := range instances {
+	for _, inst := range s.Instances {
 		w("  [%s] %s", inst.Launcher, inst.Name)
 		w("      mods: %s", inst.ModsDir)
 	}
 	w("")
 
 	writeSection := func(title string, want Verdict) {
-		any := false
-		for _, m := range mods {
+		header := false
+		for _, m := range s.Mods {
 			if m.Verdict != want {
 				continue
 			}
-			if !any {
+			if !header {
 				w("----------------------------------------------------------------")
-				w(title)
+				w("%s", title)
 				w("----------------------------------------------------------------")
-				any = true
+				header = true
 			}
 			w("  %s", m.FileName)
 			w("      instance : %s / %s", m.Instance.Launcher, m.Instance.Name)
@@ -158,11 +137,11 @@ func writeReport(instances []Instance, mods []ModResult, logFlags []LogFlag, ver
 	writeSection("FLAGGED MODS (known cheat signatures)", VerdictFlagged)
 	writeSection("WARNINGS (obfuscated / no metadata)", VerdictWarn)
 
-	if len(logFlags) > 0 {
+	if len(s.LogFlags) > 0 {
 		w("----------------------------------------------------------------")
 		w("LOG HITS")
 		w("----------------------------------------------------------------")
-		for _, lf := range logFlags {
+		for _, lf := range s.LogFlags {
 			w("  client : %s", lf.Client)
 			w("  file   : %s:%d", lf.File, lf.Line)
 			w("  line   : %s", lf.Excerpt)
@@ -173,7 +152,7 @@ func writeReport(instances []Instance, mods []ModResult, logFlags []LogFlag, ver
 	w("----------------------------------------------------------------")
 	w("ALL MODS (full inventory)")
 	w("----------------------------------------------------------------")
-	for _, m := range mods {
+	for _, m := range s.Mods {
 		status := "UNKNOWN"
 		switch m.Verdict {
 		case VerdictVerified:
@@ -195,10 +174,5 @@ func writeReport(instances []Instance, mods []ModResult, logFlags []LogFlag, ver
 	w("")
 	w("=== end of report ===")
 
-	if err := os.WriteFile(path, []byte(b.String()), 0644); err != nil {
-		warnLine("Failed to write result.txt: " + err.Error())
-		return path + " (write failed)"
-	}
-	cwd, _ := os.Getwd()
-	return cwd + string(os.PathSeparator) + path
+	return os.WriteFile(path, []byte(b.String()), 0644)
 }

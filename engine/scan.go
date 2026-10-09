@@ -1,11 +1,11 @@
-package main
+package engine
 
 import (
 	"archive/zip"
-	"bytes"
 	"crypto/sha1"
 	"crypto/sha512"
 	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,13 +44,13 @@ type LogFlag struct {
 	Excerpt  string
 }
 
-type jarRef struct {
+type JarRef struct {
 	inst Instance
 	path string
 }
 
-// scanWorkers is how many jars are hashed and inspected in parallel.
-const scanWorkers = 4
+// Workers is how many jars are hashed and inspected in parallel.
+const Workers = 4
 
 // ScanHooks lets the UI follow the worker pool. Both are called from worker
 // goroutines, so implementations must be safe for concurrent use.
@@ -59,26 +59,26 @@ type ScanHooks struct {
 	Done  func(worker int, res ModResult)
 }
 
-// collectJars lists every mod jar across all instances, in a stable order.
-func collectJars(instances []Instance) []jarRef {
-	var refs []jarRef
+// CollectJars lists every mod jar across all instances, in a stable order.
+func CollectJars(instances []Instance) []JarRef {
+	var refs []JarRef
 	for _, inst := range instances {
 		for _, jar := range listJars(inst.ModsDir) {
-			refs = append(refs, jarRef{inst, jar})
+			refs = append(refs, JarRef{inst, jar})
 		}
 	}
 	return refs
 }
 
-// inspectAll hashes and inspects every jar using a pool of scanWorkers
+// InspectAll hashes and inspects every jar using a pool of Workers
 // goroutines. Results keep the same order as refs regardless of which worker
 // finished first.
-func inspectAll(refs []jarRef, hooks ScanHooks) []ModResult {
+func InspectAll(refs []JarRef, hooks ScanHooks) []ModResult {
 	results := make([]ModResult, len(refs))
 	jobs := make(chan int)
 	var wg sync.WaitGroup
 
-	for w := 0; w < scanWorkers; w++ {
+	for w := 0; w < Workers; w++ {
 		wg.Add(1)
 		go func(worker int) {
 			defer wg.Done()
@@ -103,9 +103,9 @@ func inspectAll(refs []jarRef, hooks ScanHooks) []ModResult {
 	return results
 }
 
-// verifyModrinth checks every hash against Modrinth in batches and updates the
+// VerifyModrinth checks every hash against Modrinth in batches and updates the
 // verdicts in place. It returns false if Modrinth could not be reached.
-func verifyModrinth(results []ModResult) bool {
+func VerifyModrinth(results []ModResult) bool {
 	var allSHA1 []string
 	for _, r := range results {
 		if r.SHA1 != "" {
@@ -157,25 +157,32 @@ func inspectJar(inst Instance, path string) ModResult {
 		Verdict:  VerdictUnknown,
 	}
 
-	data, err := os.ReadFile(path)
+	// Stream the file through both hashes and read the zip directory straight
+	// from disk, so memory stays flat no matter how big the jars are.
+	f, err := os.Open(path)
 	if err != nil {
 		res.Verdict = VerdictWarn
 		res.Reasons = append(res.Reasons, "could not read file: "+err.Error())
 		return res
 	}
-	res.Size = int64(len(data))
-
-	h1 := sha1.Sum(data)
-	h5 := sha512.Sum512(data)
-	res.SHA1 = hex.EncodeToString(h1[:])
-	res.SHA512 = hex.EncodeToString(h5[:])
+	defer f.Close()
+	h1, h5 := sha1.New(), sha512.New()
+	n, err := io.CopyBuffer(io.MultiWriter(h1, h5), f, make([]byte, 64<<10))
+	if err != nil {
+		res.Verdict = VerdictWarn
+		res.Reasons = append(res.Reasons, "could not read file: "+err.Error())
+		return res
+	}
+	res.Size = n
+	res.SHA1 = hex.EncodeToString(h1.Sum(nil))
+	res.SHA512 = hex.EncodeToString(h5.Sum(nil))
 
 	lowerName := strings.ToLower(res.FileName)
 
 	var entryPaths []string
 	var classBaseNames []string
 	hasMetadata := false
-	if zr, zerr := zip.NewReader(bytes.NewReader(data), int64(len(data))); zerr == nil {
+	if zr, zerr := zip.NewReader(f, n); zerr == nil {
 		for _, f := range zr.File {
 			lname := strings.ToLower(f.Name)
 			entryPaths = append(entryPaths, lname)
@@ -276,8 +283,8 @@ func isConfusable(s string) bool {
 	return true
 }
 
-// scanLogs searches log files for launch-time cheat-client markers.
-func scanLogs(instances []Instance) []LogFlag {
+// ScanLogs searches log files for launch-time cheat-client markers.
+func ScanLogs(instances []Instance) []LogFlag {
 	var flags []LogFlag
 	seen := map[string]bool{}
 	for _, inst := range instances {

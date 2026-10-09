@@ -8,3 +8,11 @@ result.txt
 # Go
 *.test
 *.out
+
+# Wails app
+build/bin/
+frontend/node_modules/
+frontend/dist/
+frontend/wailsjs/
+frontend/package.json.md5
+

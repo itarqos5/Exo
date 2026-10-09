@@ -55,14 +55,25 @@ It is the kind of tool server staff use during a "screenshare" check.
  HOW TO USE
 ----------------------------------------------------------------
 
-  1. Download  exo-v1.0.0.exe  from the Releases page.
-  2. Run it (double-click, or run from a terminal).
-  3. Wait for the scan to finish.
-  4. Read the on-screen summary, or open  result.txt  next to the
-     program for the full report.
+  1. Download  exo-v1.2.0.exe  from the Releases page.
+  2. Double-click it. The scan starts on its own.
+  3. Read the verdict in the widget, or press "Open report" for
+     the full  result.txt , written next to the program.
 
   No installation and no admin rights are required - everything it
   reads lives inside the current user's profile.
+
+  The app is a small vertical widget: a progress ring, the four
+  stages (Discover, Inspect, Verify, Logs) and live counts. Press
+  "Show additional details" to expand it and see what each of the
+  4 workers is scanning, a live feed of checked mods, every
+  instance, and the findings with their reasons.
+
+  It needs Microsoft's WebView2 runtime, which ships with Windows 11
+  and current Windows 10. If it is missing, Exo offers to install it.
+
+  Prefer the terminal?  exo-cli.exe  runs the same scan in a console
+  window (or prints to the terminal you start it from).
 
 
 ----------------------------------------------------------------
@@ -101,16 +112,21 @@ It is the kind of tool server staff use during a "screenshare" check.
  BUILDING FROM SOURCE
 ----------------------------------------------------------------
 
-  Requires Go 1.21 or newer.
+  Requires Go 1.25+, Node.js 20+ and the Wails CLI:
 
-      go build -ldflags "-s -w" -o exo.exe ./src
+      go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
-  Or use the build script, which wipes dist/ and writes both
-  dist\exo.exe and a versioned dist\exo-v<version>.exe:
+  Then run the build script. It wipes dist/ and writes:
 
-      .\build.ps1 -Version 1.0.0
+      .\build.ps1 -Version 1.2.0
 
-  The result is a single static .exe with no runtime dependencies.
+      dist\exo.exe             the desktop widget
+      dist\exo-v1.2.0.exe      versioned copy for releases
+      dist\exo-cli.exe         the terminal version
+
+  Layout:  engine\        the scanner (shared by both apps)
+           app.go, main.go, frontend\   the widget (Go + React)
+           cmd\exo-cli\   the terminal version
 
 
 ----------------------------------------------------------------

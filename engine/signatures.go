@@ -1,9 +1,10 @@
-package main
+package engine
 
 // Signature is a known cheat-client fingerprint. We match it three ways:
 //   - against the jar's file name
 //   - against entry (package) paths inside the jar
 //   - against log file contents
+//
 // All matches are case-insensitive substring matches on lowercased input.
 type Signature struct {
 	Name     string   // human-readable client name

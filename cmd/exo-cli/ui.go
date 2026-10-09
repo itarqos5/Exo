@@ -1,6 +1,7 @@
 package main
 
 import (
+	"exo/engine"
 	"fmt"
 	"os"
 	"sort"
@@ -29,27 +30,27 @@ type liveScan struct {
 func newLiveScan(total int) *liveScan {
 	return &liveScan{
 		total:   total,
-		current: make([]string, scanWorkers),
+		current: make([]string, engine.Workers),
 		start:   time.Now(),
 		stop:    make(chan struct{}),
 	}
 }
 
-func (l *liveScan) hooks() ScanHooks {
-	return ScanHooks{
+func (l *liveScan) hooks() engine.ScanHooks {
+	return engine.ScanHooks{
 		Start: func(w int, name string) {
 			l.mu.Lock()
 			l.current[w] = name
 			l.mu.Unlock()
 		},
-		Done: func(w int, r ModResult) {
+		Done: func(w int, r engine.ModResult) {
 			l.mu.Lock()
 			l.done++
 			l.current[w] = ""
 			switch r.Verdict {
-			case VerdictFlagged:
+			case engine.VerdictFlagged:
 				l.flagged++
-			case VerdictWarn:
+			case engine.VerdictWarn:
 				l.warn++
 			}
 			l.mu.Unlock()
@@ -89,13 +90,24 @@ func (l *liveScan) finish() {
 		return
 	}
 	el := time.Since(l.start)
-	okLine(fmt.Sprintf("Inspected %d jars with %d workers in %s", l.total, scanWorkers, el.Round(time.Millisecond)))
+	okLine(fmt.Sprintf("Inspected %d jars with %d workers in %s", l.total, engine.Workers, el.Round(time.Millisecond)))
 }
 
 func (l *liveScan) draw(final bool) {
+	// Snapshot under the lock, render and print without it: writing to a
+	// classic console is slow, and workers must never wait on the screen.
 	l.mu.Lock()
-	defer l.mu.Unlock()
+	snap := liveScan{total: l.total, done: l.done, flagged: l.flagged, warn: l.warn, start: l.start}
+	snap.current = append([]string(nil), l.current...)
+	l.mu.Unlock()
 
+	lines := snap.render(final)
+	scr.replaceLast(l.drawn, lines)
+	l.drawn = len(lines)
+}
+
+// render builds the dashboard lines from a snapshot.
+func (l *liveScan) render(final bool) []string {
 	el := time.Since(l.start)
 	ratio := 1.0
 	if l.total > 0 {
@@ -133,14 +145,7 @@ func (l *liveScan) draw(final bool) {
 	clean := l.done - l.flagged - l.warn
 	lines = append(lines, fmt.Sprintf("  %s   %s%d flagged%s   %s%d warnings%s   %s%d clean so far%s",
 		"", cRed, l.flagged, cReset, cAmber, l.warn, cReset, cGreen, clean, cReset))
-
-	if l.drawn > 0 {
-		fmt.Printf("\x1b[%dA", l.drawn)
-	}
-	for _, ln := range lines {
-		fmt.Print("\x1b[2K" + ln + "\n")
-	}
-	l.drawn = len(lines)
+	return lines
 }
 
 // runWithSpinner runs fn while showing an animated spinner and label, then
@@ -158,13 +163,17 @@ func runWithSpinner(label string, fn func()) {
 	go func() { fn(); close(done) }()
 	t := time.NewTicker(80 * time.Millisecond)
 	defer t.Stop()
+	shown := 0 // the spinner occupies one line once it has been drawn
 	for {
 		select {
 		case <-done:
-			fmt.Printf("\r\x1b[2K  %s✓%s  %s%s  %s%s\n", cGreen, cReset, label, cDim, time.Since(start).Round(time.Millisecond), cReset)
+			scr.replaceLast(shown, []string{fmt.Sprintf("  %s✓%s  %s%s  %s%s",
+				cGreen, cReset, label, cDim, time.Since(start).Round(time.Millisecond), cReset)})
 			return
 		case <-t.C:
-			fmt.Printf("\r\x1b[2K  %s%s%s  %s%s%s", cLilac, spinFrame(start, 0), cReset, cWhite, label, cReset)
+			scr.replaceLast(shown, []string{fmt.Sprintf("  %s%s%s  %s%s%s",
+				cLilac, spinFrame(start, 0), cReset, cWhite, label, cReset)})
+			shown = 1
 		}
 	}
 }
@@ -179,7 +188,7 @@ func tildePath(p string) string {
 	return p
 }
 
-func printInstances(instances []Instance) {
+func printInstances(instances []engine.Instance) {
 	if len(instances) == 0 {
 		warnLine("No Minecraft mod folders found on this machine.")
 		info("Checked default locations for 30+ launchers (OneClient, Prism, Modrinth,")
@@ -188,7 +197,7 @@ func printInstances(instances []Instance) {
 	}
 	okLine(fmt.Sprintf("%s%d%s mod folder(s) found", cBold+cWhite, len(instances), cReset))
 	for _, inst := range instances {
-		fmt.Printf("     %s◆%s %s %s %s\n",
+		outf("     %s◆%s %s %s %s\n",
 			cLilac, cReset,
 			padRight(cLav+trunc(inst.Launcher, 16)+cReset, 16),
 			padRight(cWhite+trunc(inst.Name, 18)+cReset, 18),
@@ -208,7 +217,7 @@ func countNum(n int, color string) string {
 }
 
 // printInstanceTable shows a per-instance breakdown in a framed table.
-func printInstanceTable(instances []Instance, mods []ModResult) {
+func printInstanceTable(instances []engine.Instance, mods []engine.ModResult) {
 	counts := map[string]*instCounts{}
 	for _, inst := range instances {
 		counts[inst.ModsDir] = &instCounts{}
@@ -220,13 +229,13 @@ func printInstanceTable(instances []Instance, mods []ModResult) {
 		}
 		c.total++
 		switch m.Verdict {
-		case VerdictVerified:
+		case engine.VerdictVerified:
 			c.ok++
-		case VerdictUnknown:
+		case engine.VerdictUnknown:
 			c.unk++
-		case VerdictWarn:
+		case engine.VerdictWarn:
 			c.warn++
-		case VerdictFlagged:
+		case engine.VerdictFlagged:
 			c.flag++
 		}
 	}
@@ -235,41 +244,41 @@ func printInstanceTable(instances []Instance, mods []ModResult) {
 		return padRight(l, 16) + "  " + padRight(n, 20) + padLeft(t, 6) + padLeft(o, 6) + padLeft(u, 6) + padLeft(w, 6) + padLeft(f, 6)
 	}
 
-	fmt.Println(boxTitleTop(cPurple, "INSTANCES"))
-	fmt.Println(boxLine(cPurple, row(
+	out(boxTitleTop(cPurple, "INSTANCES"))
+	out(boxLine(cPurple, row(
 		cGray+"LAUNCHER"+cReset, cGray+"INSTANCE"+cReset, cGray+"MODS"+cReset,
 		cGray+"OK"+cReset, cGray+"UNK"+cReset, cGray+"WARN"+cReset, cGray+"FLAG"+cReset)))
-	fmt.Println(boxLine(cPurple, cDark+strings.Repeat("─", uiWidth-4)+cReset))
+	out(boxLine(cPurple, cDark+strings.Repeat("─", uiWidth-4)+cReset))
 	for _, inst := range instances {
 		c := counts[inst.ModsDir]
-		fmt.Println(boxLine(cPurple, row(
+		out(boxLine(cPurple, row(
 			cLav+trunc(inst.Launcher, 16)+cReset,
 			cWhite+trunc(inst.Name, 20)+cReset,
 			cBold+cWhite+fmt.Sprint(c.total)+cReset,
 			countNum(c.ok, cGreen), countNum(c.unk, cYellow),
 			countNum(c.warn, cAmber), countNum(c.flag, cRed+cBold))))
 	}
-	fmt.Println(boxBottom(cPurple))
+	out(boxBottom(cPurple))
 }
 
 // printFindings lists everything that needs a human look, most severe first.
-func printFindings(mods []ModResult, logFlags []LogFlag) {
-	var flagged, warned, unknown []ModResult
+func printFindings(mods []engine.ModResult, logFlags []engine.LogFlag) {
+	var flagged, warned, unknown []engine.ModResult
 	verified := 0
 	for _, m := range mods {
 		switch m.Verdict {
-		case VerdictFlagged:
+		case engine.VerdictFlagged:
 			flagged = append(flagged, m)
-		case VerdictWarn:
+		case engine.VerdictWarn:
 			warned = append(warned, m)
-		case VerdictUnknown:
+		case engine.VerdictUnknown:
 			unknown = append(unknown, m)
-		case VerdictVerified:
+		case engine.VerdictVerified:
 			verified++
 		}
 	}
 
-	where := func(m ModResult) string {
+	where := func(m engine.ModResult) string {
 		return cDark + m.Instance.Launcher + " · " + m.Instance.Name + cReset
 	}
 	detail := func(reasons []string, color string) {
@@ -278,20 +287,20 @@ func printFindings(mods []ModResult, logFlags []LogFlag) {
 			if i == len(reasons)-1 {
 				branch = "└"
 			}
-			fmt.Printf("          %s%s%s %s%s%s\n", cDark, branch, cReset, color, trunc(r, uiWidth-14), cReset)
+			outf("          %s%s%s %s%s%s\n", cDark, branch, cReset, color, trunc(r, uiWidth-14), cReset)
 		}
 	}
 
 	for _, m := range flagged {
-		fmt.Printf("  %s  %s  %s\n", badge("FLAG", bgRed), cBold+cWhite+trunc(m.FileName, 34)+cReset, where(m))
+		outf("  %s  %s  %s\n", badge("FLAG", bgRed), cBold+cWhite+trunc(m.FileName, 34)+cReset, where(m))
 		detail(m.Reasons, cRed)
 	}
 	for _, m := range warned {
-		fmt.Printf("  %s  %s  %s\n", badge("WARN", bgAmber), cWhite+trunc(m.FileName, 34)+cReset, where(m))
+		outf("  %s  %s  %s\n", badge("WARN", bgAmber), cWhite+trunc(m.FileName, 34)+cReset, where(m))
 		detail(m.Reasons, cAmber)
 	}
 	for _, lf := range logFlags {
-		fmt.Printf("  %s  %s  %s\n", badge("LOG ", bgRed), cBold+cWhite+lf.Client+cReset, cDark+truncLeft(fmt.Sprintf("%s:%d", lf.File, lf.Line), 40)+cReset)
+		outf("  %s  %s  %s\n", badge("LOG ", bgRed), cBold+cWhite+lf.Client+cReset, cDark+truncLeft(fmt.Sprintf("%s:%d", lf.File, lf.Line), 40)+cReset)
 		detail([]string{lf.Excerpt}, cRed)
 	}
 	if len(flagged)+len(warned)+len(logFlags) == 0 {
@@ -299,7 +308,7 @@ func printFindings(mods []ModResult, logFlags []LogFlag) {
 	}
 
 	if len(unknown) > 0 {
-		fmt.Println()
+		out("")
 		// Group identical jars that sit in several instances.
 		seen := map[string]int{}
 		var names []string
@@ -311,7 +320,7 @@ func printFindings(mods []ModResult, logFlags []LogFlag) {
 			seen[n]++
 		}
 		sort.Slice(names, func(i, j int) bool { return strings.ToLower(names[i]) < strings.ToLower(names[j]) })
-		fmt.Printf("  %s  %s%d mods not found on Modrinth%s %s(CurseForge-only or private, not proof)%s\n",
+		outf("  %s  %s%d mods not found on Modrinth%s %s(not proof of cheating)%s\n",
 			badge(" ?? ", bgYellow), cWhite, len(unknown), cReset, cDark, cReset)
 		const colW = 30
 		cell := func(n string) string {
@@ -326,13 +335,13 @@ func printFindings(mods []ModResult, logFlags []LogFlag) {
 			if i+1 < len(names) {
 				line += "  " + cell(names[i+1])
 			}
-			fmt.Println(line)
+			out(line)
 		}
 	}
 
 	if verified > 0 {
-		fmt.Println()
-		fmt.Printf("  %s  %s%d mods%s verified against Modrinth %s(full list in result.txt)%s\n",
+		out("")
+		outf("  %s  %s%d mods%s verified against Modrinth %s(full list in result.txt)%s\n",
 			badge(" OK ", bgGreen), cWhite, verified, cReset, cDark, cReset)
 	}
 }
@@ -393,18 +402,18 @@ func printSummary(instances, mods, verified, unknown, warn, flagged, logHits int
 		return c + "■" + cReset + " " + cWhite + fmt.Sprint(n) + cReset + " " + cGray + label + cReset
 	}
 
-	fmt.Println()
-	fmt.Println(boxTitleTop(color, "VERDICT"))
-	fmt.Println(boxLine(color, ""))
-	fmt.Println(boxLine(color, "  "+badge(verdict, bg)+"  "+cGray+trunc(sub, uiWidth-12-len(verdict))+cReset))
-	fmt.Println(boxLine(color, ""))
-	fmt.Println(boxLine(color, "  "+stackedBar(uiWidth-8,
+	out("")
+	out(boxTitleTop(color, "VERDICT"))
+	out(boxLine(color, ""))
+	out(boxLine(color, "  "+badge(verdict, bg)+"  "+cGray+trunc(sub, uiWidth-12-len(verdict))+cReset))
+	out(boxLine(color, ""))
+	out(boxLine(color, "  "+stackedBar(uiWidth-8,
 		[]int{verified, unknown, warn, flagged},
 		[]string{cGreen, cYellow, cAmber, cRed})))
-	fmt.Println(boxLine(color, "  "+legend(verified, cGreen, "verified")+"  "+legend(unknown, cYellow, "unknown")+"  "+
+	out(boxLine(color, "  "+legend(verified, cGreen, "verified")+"  "+legend(unknown, cYellow, "unknown")+"  "+
 		legend(warn, cAmber, "warn")+"  "+legend(flagged, cRed, "flagged")+"  "+legend(logHits, cRed, "log hits")))
-	fmt.Println(boxLine(color, ""))
-	fmt.Println(boxLine(color, "  "+cGray+fmt.Sprintf("%d mods · %d instances · %d workers · %s", mods, instances, scanWorkers, dur.Round(time.Millisecond))+cReset))
-	fmt.Println(boxLine(color, "  "+cGray+"report "+cReset+cLav+truncLeft(reportPath, uiWidth-14)+cReset))
-	fmt.Println(boxBottom(color))
+	out(boxLine(color, ""))
+	out(boxLine(color, "  "+cGray+fmt.Sprintf("%d mods · %d instances · %d workers · %s", mods, instances, engine.Workers, dur.Round(time.Millisecond))+cReset))
+	out(boxLine(color, "  "+cGray+"report "+cReset+cLav+truncLeft(reportPath, uiWidth-14)+cReset))
+	out(boxBottom(color))
 }
